@@ -1,0 +1,12 @@
+# Local salary, calendar, pause and overtime records
+data.xml
+data.xml.*
+
+# Generated binaries and packages
+*.exe
+*.pdb
+*.zip
+*.tmp
+bin/
+obj/
+.vs/
