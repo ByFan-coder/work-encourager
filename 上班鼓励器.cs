@@ -35,6 +35,8 @@ public class AppData {
 }
 public class OvertimeRecord {
     public DateTime StartUtc, EndUtc, LocalDay;
+    public DateTime StartLocal, EndLocal;
+    public bool ExclusiveNormal;
     public int Category;
     public decimal HourlyRate;
 }
@@ -45,7 +47,7 @@ public static class OvertimeEngine {
         if(Running(d)!=null)throw new InvalidOperationException("已有加班正在计时");
         if(category<0 || category>2)throw new ArgumentOutOfRangeException("category");
         DateTime baseDay=Engine.ShiftDay(d.Settings,local);
-        OvertimeRecord r=new OvertimeRecord {StartUtc=utc,LocalDay=baseDay.Date,Category=category,HourlyRate=Engine.DailyPay(d.Settings,baseDay)/(decimal)(Engine.Planned(d.Settings)/3600)};
+        OvertimeRecord r=new OvertimeRecord {StartUtc=utc,StartLocal=local,ExclusiveNormal=true,LocalDay=baseDay.Date,Category=category,HourlyRate=Engine.DailyPay(d.Settings,baseDay)/(decimal)(Engine.Planned(d.Settings)/3600)};
         d.Overtime.Add(r);return r;
     }
     public static double Seconds(OvertimeRecord r,DateTime utc) {return Math.Max(0,((r.EndUtc==DateTime.MinValue?utc:r.EndUtc)-r.StartUtc).TotalSeconds);}
@@ -61,6 +63,7 @@ public static class OvertimeEngine {
         foreach(OvertimeRecord r in records) {
             if(r==null || r.StartUtc==DateTime.MinValue || r.LocalDay==DateTime.MinValue || r.LocalDay!=r.LocalDay.Date || r.HourlyRate<0 || r.Category<0 || r.Category>2)return false;
             if(r.EndUtc==DateTime.MinValue)open++;else if(r.EndUtc<r.StartUtc)return false;
+            if(r.ExclusiveNormal && (r.StartLocal==DateTime.MinValue || (r.EndUtc!=DateTime.MinValue && r.EndLocal==DateTime.MinValue)))return false;
         }
         return open<=1;
     }
@@ -132,6 +135,12 @@ public static class Engine {
                 if(b>end) b=end;
                 if(b>a) cuts.Add(new Span(a,b));
             }
+            foreach(OvertimeRecord r in data.Overtime) if(r.ExclusiveNormal) {
+                DateTime a=r.StartLocal>block.A?r.StartLocal:block.A;
+                DateTime b=r.EndUtc==DateTime.MinValue?until:r.EndLocal;
+                if(b>end)b=end;
+                if(b>a)cuts.Add(new Span(a,b));
+            }
             cuts.Sort(delegate(Span x,Span y){return x.A.CompareTo(y.A);});
             DateTime cursor=block.A;
             foreach(Span c in cuts) { DateTime a=c.A>cursor ? c.A:cursor; if(c.B>a) lost+=(c.B-a).TotalSeconds; if(c.B>cursor)cursor=c.B; }
@@ -146,6 +155,10 @@ public static class Engine {
         return total;
     }
     public static PauseRecord OpenPause(AppData d) { return d.Pauses.FindLast(delegate(PauseRecord p){return p.End==DateTime.MinValue;}); }
+    public static void SetPaused(AppData d,bool paused,DateTime now) {
+        if(paused){if(OpenPause(d)==null)d.Pauses.Add(new PauseRecord {Start=now});}
+        else foreach(PauseRecord p in d.Pauses)if(p.End==DateTime.MinValue)p.End=now>p.Start?now:p.Start;
+    }
     public static bool Active(Settings s,DateTime day,DateTime now) { return Blocks(s,day).Exists(delegate(Span b){return now>=b.A && now<b.B;}); }
 }
 public static class Store {
@@ -192,7 +205,7 @@ public class FlatButton : Button {
 public class MainForm : Form {
     AppData data;
     System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer();
-    FlatButton pause=new FlatButton(), settings=new FlatButton(), overtime=new FlatButton(), minimize=new FlatButton(), close=new FlatButton();
+    FlatButton settings=new FlatButton(), overtime=new FlatButton(), minimize=new FlatButton(), close=new FlatButton();
     FlatButton overtimeType=new FlatButton();
     ContextMenuStrip overtimeMenu=new ContextMenuStrip();
     int overtimeCategory;
@@ -202,15 +215,14 @@ public class MainForm : Form {
     public MainForm(AppData d) {
         data=d; Text="上班鼓励器 SV版"; BackColor=Bg; ForeColor=Color.White;
         AutoScaleMode=AutoScaleMode.None; FormBorderStyle=FormBorderStyle.None; MaximizeBox=false; StartPosition=FormStartPosition.CenterScreen;
-        using(Graphics g=CreateGraphics()) scale=Math.Min(g.DpiX/96f,Math.Min((Screen.PrimaryScreen.WorkingArea.Height-40)/508f,(Screen.PrimaryScreen.WorkingArea.Width-40)/280f));
-        ClientSize=new Size((int)(280*scale),(int)(508*scale));
+        using(Graphics g=CreateGraphics()) scale=Math.Min(g.DpiX/96f,Math.Min((Screen.PrimaryScreen.WorkingArea.Height-40)/384f,(Screen.PrimaryScreen.WorkingArea.Width-40)/280f));
+        ClientSize=new Size((int)(280*scale),(int)(384*scale));
         DoubleBuffered=true; TopMost=d.Settings.AlwaysOnTop;
         SetButton(settings,"设置",222,40,42,24,8); settings.Fill=Color.FromArgb(62,70,82);
-        SetButton(pause,"暂停计时",16,202,248,30,9);
         SetButton(minimize,"－",228,3,22,22,8);minimize.Fill=Bg;minimize.AccessibleName="最小化";minimize.Click+=delegate{WindowState=FormWindowState.Minimized;};
         SetButton(close,"×",253,3,22,22,10);close.Fill=Bg;close.AccessibleName="关闭窗口";close.Click+=delegate{Close();};
-        SetButton(overtime,"开始加班",170,421,94,25,8);overtime.Fill=Color.FromArgb(47,110,175);
-        SetButton(overtimeType,"",16,421,144,25,8);overtimeType.Fill=Color.FromArgb(62,70,82);overtimeType.AccessibleName="加班类型";
+        SetButton(overtime,"开始加班",150,202,114,30,8);overtime.Fill=Color.FromArgb(47,110,175);
+        SetButton(overtimeType,"",16,202,124,30,8);overtimeType.Fill=Color.FromArgb(62,70,82);overtimeType.AccessibleName="加班类型";
         string[] types={"工作日 × 0.75","周末 × 1","法定节假日 × 1.5"};
         OvertimeRecord running=OvertimeEngine.Running(data);overtimeCategory=running!=null ? running.Category:Engine.IsWorkday(data.Settings,Engine.ShiftDay(data.Settings,DateTime.Now))?0:1;
         overtimeType.Text=types[overtimeCategory]+" ▾";
@@ -229,31 +241,25 @@ public class MainForm : Form {
             }else {
                 DateTime utc=DateTime.UtcNow;
                 if(utc<r.StartUtc){MessageBox.Show(this,"当前时间早于加班开始时间，请检查电脑时间后再结束。","无法结束加班");return;}
-                r.EndUtc=utc;if(!TrySave())r.EndUtc=DateTime.MinValue;
+                r.EndUtc=utc;r.EndLocal=DateTime.Now;if(!TrySave()){r.EndUtc=DateTime.MinValue;r.EndLocal=DateTime.MinValue;}
             }
             UpdateButton();Refresh();
         };
-        settings.Click+=delegate { using(SettingsForm dialog=new SettingsForm(data.Settings)) if(dialog.ShowDialog(this)==DialogResult.OK) {
-            Settings old=data.Settings; data.Settings=dialog.Result;
-            if(TrySave()) TopMost=data.Settings.AlwaysOnTop; else data.Settings=old;
+        settings.Click+=delegate { using(SettingsForm dialog=new SettingsForm(data.Settings,Engine.OpenPause(data)!=null)) if(dialog.ShowDialog(this)==DialogResult.OK) {
+            Settings old=data.Settings;List<PauseRecord> oldPauses=data.Pauses;data.Settings=dialog.Result;
+            data.Pauses=oldPauses.ConvertAll(delegate(PauseRecord p){return new PauseRecord {Start=p.Start,End=p.End};});
+            Engine.SetPaused(data,dialog.NormalPaused,DateTime.Now);
+            if(TrySave()) TopMost=data.Settings.AlwaysOnTop; else {data.Settings=old;data.Pauses=oldPauses;}
             Refresh();
         }};
-        pause.Click+=delegate {
-            PauseRecord p=Engine.OpenPause(data); DateTime old=DateTime.MinValue;
-            if(p==null) { p=new PauseRecord {Start=DateTime.Now}; data.Pauses.Add(p); }
-            else { old=p.End; p.End=DateTime.Now; }
-            if(!TrySave()) { if(old==DateTime.MinValue && p.End!=DateTime.MinValue) p.End=old; else data.Pauses.Remove(p); }
-            Refresh();
-        };
         timer.Interval=250; timer.Tick+=delegate { UpdateButton(); Invalidate(); }; timer.Start(); UpdateButton();
         FormClosed+=delegate {timer.Dispose();overtimeMenu.Dispose();};
     }
     void SetButton(FlatButton b,string text,int x,int y,int w,int h,int fs) {b.Text=text;b.SetBounds((int)(x*scale),(int)(y*scale),(int)(w*scale),(int)(h*scale));b.Font=new Font("Microsoft YaHei UI",fs*scale*1.333f,FontStyle.Bold,GraphicsUnit.Pixel); Controls.Add(b);}
     bool TrySave() {try {Store.Save(data);return true;}catch(Exception e){MessageBox.Show(this,"无法保存，请把整个文件夹放到可写的位置。\n"+e.Message,"保存失败",MessageBoxButtons.OK,MessageBoxIcon.Warning);return false;}}
     void UpdateButton() {
-        pause.Text=Engine.OpenPause(data)==null ? "暂停计时":"继续计时";
         bool running=OvertimeEngine.Running(data)!=null;
-        overtime.Text=running?"加班结束":"开始加班";overtimeType.Enabled=!running;
+        overtime.Text=running?"结束加班":"开始加班";overtimeType.Enabled=!running;
     }
     protected override void OnMouseDown(MouseEventArgs e) {base.OnMouseDown(e);if(e.Button==MouseButtons.Left && e.Y<28*scale){dragOffset=e.Location;Capture=true;}}
     protected override void OnMouseMove(MouseEventArgs e) {base.OnMouseMove(e);if(dragOffset.HasValue && Capture)Location=new Point(Cursor.Position.X-dragOffset.Value.X,Cursor.Position.Y-dragOffset.Value.Y);}
@@ -269,48 +275,51 @@ public class MainForm : Form {
     protected override void OnPaint(PaintEventArgs e) {
         base.OnPaint(e); Graphics g=e.Graphics;g.ScaleTransform(scale,scale);g.SmoothingMode=SmoothingMode.AntiAlias;g.TextRenderingHint=System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         TextAt(g,"上班鼓励器",12,6,76,19,11,Color.White,FontStyle.Regular);TextAt(g,"SV版",88,6,50,19,11,Blue,FontStyle.Bold);
-        using(Pen border=new Pen(Color.FromArgb(70,82,98)))g.DrawRectangle(border,.5f,.5f,279,507);
+        using(Pen border=new Pen(Color.FromArgb(70,82,98)))g.DrawRectangle(border,.5f,.5f,279,383);
         using(Pen line=new Pen(Color.FromArgb(60,70,84)))g.DrawLine(line,1,28,279,28);
         g.TranslateTransform(0,28);
         Settings s=data.Settings;DateTime now=DateTime.Now,day=Engine.ShiftDay(s,now);bool paused=Engine.OpenPause(data)!=null;List<Span> blocks=Engine.Blocks(s,day);bool active=Engine.Active(s,day,now);
         Color amountColor=Color.FromArgb(s.AmountColorArgb);
+        DateTime utc=DateTime.UtcNow;OvertimeRecord ot=OvertimeEngine.Running(data);bool isOvertime=ot!=null;
         string status,detail;
-        if(paused){status="已暂停";detail="正常计时已暂停，点击「继续计时」恢复";}
+        if(isOvertime){status="加班中";detail="已加班 "+Duration(TimeSpan.FromSeconds(Math.Floor(OvertimeEngine.Seconds(ot,utc))));}
+        else if(paused){status="正常已暂停";detail="可在设置中取消「暂停正常计时」";}
         else if(blocks.Count==0){status="今天休息";detail="好好休息，也是为了更好地出发";}
         else if(now<blocks[0].A){status="尚未上班";detail="距离上班还有 "+Duration(blocks[0].A-now);}
         else if(now>=blocks[blocks.Count-1].B){status="下班啦";detail="今天辛苦了，剩下的时间属于自己";}
         else {status=active ? "上班中":"午休中";detail="距离下班还有 "+Duration(blocks[blocks.Count-1].B-now);}
-        Box(g,16,18,3,17,paused?Muted:Blue,1);TextAt(g,status,27,13,182,26,16,Color.White,FontStyle.Bold);T(g,detail,16,47,248,21,11,Muted);
+        Box(g,16,18,3,17,paused&&!isOvertime?Muted:Blue,1);TextAt(g,status,27,13,182,26,16,Color.White,FontStyle.Bold);T(g,detail,16,47,248,21,11,Muted);
         T(g,"今日已赚",16,79,248,21,11,Muted);
-        DateTime utc=DateTime.UtcNow;
         decimal pay=Engine.Pay(data,day,now)+OvertimeEngine.Total(data,day,utc,false),month=Engine.Month(data,day,now)+OvertimeEngine.Total(data,day,utc,true);string money=pay.ToString("F4");float size=money.Length>11?22:money.Length>9?27:34;
         T(g,"¥",16,115,17,26,18,amountColor);TextAt(g,money,35,97,229,48,size,amountColor,FontStyle.Bold);
         decimal dailyPay=Engine.DailyPay(s,day);
-        decimal speed=active&&!paused?dailyPay/(decimal)Engine.Planned(s):0;
-        T(g,"正常速度",16,147,62,20,10,Muted);T(g,"¥"+speed.ToString("F4")+" / 秒",80,147,184,20,10,amountColor);
+        decimal speed=isOvertime?ot.HourlyRate*OvertimeEngine.Multipliers[ot.Category]/3600:active&&!paused?dailyPay/(decimal)Engine.Planned(s):0;
+        T(g,isOvertime?"加班速度":"正常速度",16,147,62,20,10,Muted);T(g,"¥"+speed.ToString("F4")+" / 秒",80,147,184,20,10,amountColor);
         double worked=Engine.Seconds(data,day,now),planned=Engine.Planned(s),progress=Math.Min(1,worked/planned);
-        TextAt(g,"工时进度  "+progress.ToString("P1"),16,222,248,22,12,Color.White,FontStyle.Bold);
-        T(g,"已工作 "+(worked/3600).ToString("F2")+" / "+(planned/3600).ToString("F2")+" 小时",16,245,248,21,10,Muted);
+        if(isOvertime) {
+            double seconds=OvertimeEngine.Seconds(ot,utc);progress=(seconds%1800)/1800;
+            TextAt(g,"加班计薪 "+OvertimeEngine.Hours(ot,utc).ToString("0.0")+" h",16,222,137,22,12,Color.White,FontStyle.Bold);
+            TextAt(g,"¥"+OvertimeEngine.Pay(ot,utc).ToString("F2"),155,219,109,25,15,amountColor,FontStyle.Bold);
+            T(g,"距下一档还需 "+Duration(TimeSpan.FromSeconds(1800-seconds%1800)),16,245,248,21,10,Muted);
+        }else {
+            TextAt(g,"工时进度  "+progress.ToString("P1"),16,222,248,22,12,Color.White,FontStyle.Bold);
+            T(g,"已工作 "+(worked/3600).ToString("F2")+" / "+(planned/3600).ToString("F2")+" 小时",16,245,248,21,10,Muted);
+        }
         Box(g,16,271,248,6,Color.FromArgb(73,82,96),3);if(progress>0)Box(g,16,271,(float)(248*progress),6,Blue,3);
         using(Pen p=new Pen(Color.FromArgb(72,81,94)))g.DrawLine(p,16,293,264,293);
         T(g,"本月累计 · 估算",16,308,115,21,11,Color.White);TextAt(g,"¥"+month.ToString("F2"),136,301,128,28,18,amountColor,FontStyle.Bold);
         T(g,"本月 "+Engine.Workdays(s,day)+" 个工作日 · 含加班估算",16,335,248,18,9,Muted);
-        using(Pen line=new Pen(Color.FromArgb(72,81,94)))g.DrawLine(line,16,360,264,360);
-        OvertimeRecord ot=OvertimeEngine.Running(data);
-        bool isRunning=ot!=null;if(ot==null && data.Overtime.Count>0)ot=data.Overtime[data.Overtime.Count-1];
-        TextAt(g,isRunning?"加班计时中":"加班计时",16,371,147,22,12,isRunning?Blue:Color.White,FontStyle.Bold);
-        T(g,ot==null?"未开始":Duration(TimeSpan.FromSeconds(Math.Floor(OvertimeEngine.Seconds(ot,utc)))),16,425,248,20,10,Muted);
-        decimal hours=ot==null?0:OvertimeEngine.Hours(ot,utc),otPay=ot==null?0:OvertimeEngine.Pay(ot,utc);
-        T(g,"本次计薪 "+hours.ToString("0.0")+" h",16,450,122,22,11,Muted);TextAt(g,"¥"+otPay.ToString("F2"),144,445,120,27,17,amountColor,FontStyle.Bold);
     }
 }
 public class SettingsForm : Form {
     public Settings Result;
+    CheckBox normalPause;
+    public bool NormalPaused {get{return normalPause.Checked;}}
     NumericUpDown pay;
     Color selectedColor;
     List<DayOverride> calendar=new List<DayOverride>();
     DateTimePicker start,end,ls,le;CheckBox lunch,top;CheckBox[] days=new CheckBox[7];
-    public SettingsForm(Settings s) {
+    public SettingsForm(Settings s,bool paused=false) {
         Text="工资与外观设置";Font=new Font("Microsoft YaHei UI",9);AutoScaleMode=AutoScaleMode.None;ClientSize=new Size(430,566);FormBorderStyle=FormBorderStyle.FixedDialog;MaximizeBox=false;MinimizeBox=false;StartPosition=FormStartPosition.CenterParent;BackColor=Color.FromArgb(245,247,250);
         Label help=new Label {Text="日薪 = 月薪 ÷ 当月实际工作日，每月自动重算。",AutoSize=true,Location=new Point(22,18)};Controls.Add(help);
         pay=Number("月薪（元）",58,s.MonthlyPay,1,31000000);
@@ -335,6 +344,7 @@ public class SettingsForm : Form {
         Panel swatch=new Panel {BackColor=selectedColor,Location=new Point(312,403),Size=new Size(88,30),BorderStyle=BorderStyle.FixedSingle,AccessibleName="当前金额颜色预览"};Controls.Add(swatch);
         color.Click+=delegate {using(ColorDialog picker=new ColorDialog {Color=selectedColor,FullOpen=true}) if(picker.ShowDialog(this)==DialogResult.OK){selectedColor=Color.FromArgb(255,picker.Color);swatch.BackColor=selectedColor;}};
         top=new CheckBox {Text="窗口始终置顶",Checked=s.AlwaysOnTop,Location=new Point(24,449),AutoSize=true};Controls.Add(top);
+        normalPause=new CheckBox {Text="暂停正常计时",Checked=paused,Location=new Point(205,449),AutoSize=true};Controls.Add(normalPause);
         Label note=new Label {Text="节假日、调休请在「调整本月排班」中勾选。\n修改月薪或排班会重新计算本月估算。",Location=new Point(24,478),Size=new Size(390,39),ForeColor=Color.DimGray};Controls.Add(note);
         Button ok=new Button {Text="保存设置",Location=new Point(282,524),Size=new Size(118,30)};Controls.Add(ok);AcceptButton=ok;
         Button cancel=new Button {Text="取消",DialogResult=DialogResult.Cancel,Location=new Point(184,524),Size=new Size(88,30)};Controls.Add(cancel);CancelButton=cancel;
